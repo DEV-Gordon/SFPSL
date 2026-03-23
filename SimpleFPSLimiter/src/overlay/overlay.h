@@ -19,6 +19,7 @@ private:
     static ID3D12DescriptorHeap* s_srvHeap;
     static ID3D12GraphicsCommandList* s_cmdList;
     static ID3D12CommandAllocator* s_cmdAllocator;
+    static ID3D12CommandQueue* s_cmdQueue;
     static UINT                        s_bufferCount;
 
     // Para medir FPS real
