@@ -1,0 +1,40 @@
+# Build output
+out/
+build/
+*.dll
+*.lib
+*.exp
+*.ilk
+*.pdb
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CMakeSettings.json
+.cmake/
+
+# Visual Studio
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docview
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+
+# Dependencias (se clonan, no se suben)
+third_party/
+
+# Logs del mod
+*.log
+SimpleFPSLimiter_log.txt
+
+# Config generada por el mod
+SimpleFPSLimiter.ini
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
