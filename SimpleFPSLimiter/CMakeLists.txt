@@ -45,5 +45,5 @@ target_link_libraries(SimpleFPSLimiter
     winmm
 )
 
-# El output se llama dxgi.dll
-set_target_properties(SimpleFPSLimiter PROPERTIES OUTPUT_NAME "dxgi")
+# El output se llama version.dll
+set_target_properties(SimpleFPSLimiter PROPERTIES OUTPUT_NAME "version")

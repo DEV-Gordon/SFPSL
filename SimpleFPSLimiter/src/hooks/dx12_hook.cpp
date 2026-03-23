@@ -85,7 +85,19 @@ void DX12Hook::Install() {
     scDesc.BufferCount = 2;
     scDesc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     scDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    scDesc.OutputWindow = GetForegroundWindow();
+
+    HWND hwnd = NULL;
+    EnumWindows([](HWND h, LPARAM lp) -> BOOL {
+        DWORD pid;
+        GetWindowThreadProcessId(h, &pid);
+        if (pid == GetCurrentProcessId() && IsWindowVisible(h)) {
+            *(HWND*)lp = h;
+            return FALSE;
+        }
+        return TRUE;
+        }, (LPARAM)&hwnd);
+
+    scDesc.OutputWindow = hwnd;
     scDesc.SampleDesc.Count = 1;
     scDesc.Windowed = TRUE;
     scDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
