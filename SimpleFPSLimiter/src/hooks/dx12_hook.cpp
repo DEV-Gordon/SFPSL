@@ -4,21 +4,15 @@
 #include "../limiter/fps_limiter.h"
 #include <MinHook.h>
 
-// Punteros a las funciones originales
 typedef HRESULT(STDMETHODCALLTYPE* PFN_Present)(IDXGISwapChain*, UINT, UINT);
 typedef HRESULT(STDMETHODCALLTYPE* PFN_ResizeBuffers)(IDXGISwapChain*, UINT, UINT, UINT, DXGI_FORMAT, UINT);
 typedef void(STDMETHODCALLTYPE* PFN_ExecuteCommandLists)(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*);
 
-static PFN_Present              oPresent = nullptr;
-static PFN_ResizeBuffers        oResizeBuffers = nullptr;
-static PFN_ExecuteCommandLists  oExecuteCommandLists = nullptr;
-
-// Capturamos el CommandQueue aquí — ImGui DX12 lo necesita
+static PFN_Present             oPresent = nullptr;
+static PFN_ResizeBuffers       oResizeBuffers = nullptr;
+static PFN_ExecuteCommandLists oExecuteCommandLists = nullptr;
 static ID3D12CommandQueue* g_commandQueue = nullptr;
 
-// ExecuteCommandLists: lo hookeamos solo para capturar el CommandQueue
-// El juego lo llama antes de Present, así que cuando llegue Present
-// ya tenemos el puntero que necesitamos
 void STDMETHODCALLTYPE HookedExecuteCommandLists(
     ID3D12CommandQueue* queue,
     UINT numLists,
@@ -26,22 +20,18 @@ void STDMETHODCALLTYPE HookedExecuteCommandLists(
 {
     if (!g_commandQueue)
         g_commandQueue = queue;
-
     oExecuteCommandLists(queue, numLists, lists);
 }
 
 HRESULT STDMETHODCALLTYPE HookedPresent(
     IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags)
 {
-    // Inicializar el overlay la primera vez que tenemos todo listo
     if (!Overlay::IsInitialized() && g_commandQueue)
         Overlay::Init(pSwapChain, g_commandQueue);
 
-    // Renderizar overlay (calcula ImGui::Render internamente)
     if (Overlay::IsInitialized())
         Overlay::Render();
 
-    // Limitar FPS antes de presentar
     FPSLimiter::Tick();
 
     return oPresent(pSwapChain, SyncInterval, Flags);
@@ -52,15 +42,36 @@ HRESULT STDMETHODCALLTYPE HookedResizeBuffers(
     UINT bufferCount, UINT width, UINT height,
     DXGI_FORMAT format, UINT flags)
 {
-    // Cuando cambia el tamaño de ventana, ImGui necesita reinicializarse
     Overlay::OnResize();
-    return oResizeBuffers(pSwapChain, bufferCount, width, height, format, flags);
+    return oResizeBuffers(pSwapChain, bufferCount,
+        width, height, format, flags);
 }
 
 void DX12Hook::Install() {
-    // — Crear SwapChain temporal para leer la vtable —
+    // FIX CRÍTICO: cargar d3d12.dll y dxgi.dll explícitamente de System32
+    // para que CreateDXGIFactory1 no llame a nuestra propia función exportada
+    wchar_t sysPath[MAX_PATH];
+    GetSystemDirectoryW(sysPath, MAX_PATH);
+
+    wchar_t dxgiPath[MAX_PATH], d3d12Path[MAX_PATH];
+    wcscpy_s(dxgiPath, sysPath); wcscat_s(dxgiPath, L"\\dxgi.dll");
+    wcscpy_s(d3d12Path, sysPath); wcscat_s(d3d12Path, L"\\d3d12.dll");
+
+    HMODULE hDxgi = LoadLibraryW(dxgiPath);
+    HMODULE hD3D12 = LoadLibraryW(d3d12Path);
+    if (!hDxgi || !hD3D12) return;
+
+    // Obtener punteros a las funciones REALES de System32
+    auto realCreateFactory = (decltype(&CreateDXGIFactory1))
+        GetProcAddress(hDxgi, "CreateDXGIFactory1");
+    auto realCreateDevice = (PFN_D3D12_CREATE_DEVICE)
+        GetProcAddress(hD3D12, "D3D12CreateDevice");
+    if (!realCreateFactory || !realCreateDevice) return;
+
+    // Crear objetos temporales usando las funciones REALES
     ID3D12Device* device = nullptr;
-    D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device));
+    realCreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+        IID_PPV_ARGS(&device));
     if (!device) return;
 
     D3D12_COMMAND_QUEUE_DESC qDesc{};
@@ -68,7 +79,7 @@ void DX12Hook::Install() {
     device->CreateCommandQueue(&qDesc, IID_PPV_ARGS(&queue));
 
     IDXGIFactory4* factory = nullptr;
-    CreateDXGIFactory1(IID_PPV_ARGS(&factory));
+    realCreateFactory(IID_PPV_ARGS(&factory));
 
     DXGI_SWAP_CHAIN_DESC scDesc{};
     scDesc.BufferCount = 2;
@@ -81,24 +92,26 @@ void DX12Hook::Install() {
 
     IDXGISwapChain* swapChain = nullptr;
     factory->CreateSwapChain(queue, &scDesc, &swapChain);
+    if (!swapChain) {
+        queue->Release(); device->Release(); factory->Release();
+        return;
+    }
 
-    // Leer las vtables
-    // SwapChain vtable: [8] = Present, [13] = ResizeBuffers
-    // CommandQueue vtable: [10] = ExecuteCommandLists
     void** scVtable = *reinterpret_cast<void***>(swapChain);
     void** cqVtable = *reinterpret_cast<void***>(queue);
 
-    // Instalar los tres hooks
     MH_Initialize();
-    MH_CreateHook(scVtable[8], reinterpret_cast<void*>(&HookedPresent),
+    MH_CreateHook(scVtable[8],
+        reinterpret_cast<void*>(&HookedPresent),
         reinterpret_cast<void**>(&oPresent));
-    MH_CreateHook(scVtable[13], reinterpret_cast<void*>(&HookedResizeBuffers),
+    MH_CreateHook(scVtable[13],
+        reinterpret_cast<void*>(&HookedResizeBuffers),
         reinterpret_cast<void**>(&oResizeBuffers));
-    MH_CreateHook(cqVtable[10], reinterpret_cast<void*>(&HookedExecuteCommandLists),
+    MH_CreateHook(cqVtable[10],
+        reinterpret_cast<void*>(&HookedExecuteCommandLists),
         reinterpret_cast<void**>(&oExecuteCommandLists));
     MH_EnableHook(MH_ALL_HOOKS);
 
-    // Limpiar objetos temporales
     swapChain->Release();
     queue->Release();
     device->Release();

@@ -14,6 +14,7 @@ ID3D12DescriptorHeap* Overlay::s_rtvHeap = nullptr;
 ID3D12DescriptorHeap* Overlay::s_srvHeap = nullptr;
 ID3D12GraphicsCommandList* Overlay::s_cmdList = nullptr;
 ID3D12CommandAllocator* Overlay::s_cmdAllocator = nullptr;
+ID3D12CommandQueue* Overlay::s_cmdQueue = nullptr;
 UINT                       Overlay::s_bufferCount = 0;
 float                      Overlay::s_fpsAccum = 0.0f;
 int                        Overlay::s_fpsFrames = 0;
@@ -22,11 +23,15 @@ uint64_t                   Overlay::s_fpsLastTime = 0;
 
 void Overlay::Init(IDXGISwapChain* swapChain, ID3D12CommandQueue* cmdQueue) {
     if (s_initialized) return;
+    s_cmdQueue = cmdQueue;
 
     // Obtener el device desde el swapchain
     IDXGISwapChain3* swapChain3 = nullptr;
     swapChain->QueryInterface(IID_PPV_ARGS(&swapChain3));
+    if (!swapChain3) return;
+
     swapChain3->GetDevice(IID_PPV_ARGS(&s_device));
+    if (!s_device) { swapChain3->Release(); return; }
 
     DXGI_SWAP_CHAIN_DESC desc{};
     swapChain3->GetDesc(&desc);
@@ -36,23 +41,36 @@ void Overlay::Init(IDXGISwapChain* swapChain, ID3D12CommandQueue* cmdQueue) {
     D3D12_DESCRIPTOR_HEAP_DESC rtvDesc{};
     rtvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
     rtvDesc.NumDescriptors = s_bufferCount;
-    s_device->CreateDescriptorHeap(&rtvDesc, IID_PPV_ARGS(&s_rtvHeap));
+    rtvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+    if (FAILED(s_device->CreateDescriptorHeap(&rtvDesc, IID_PPV_ARGS(&s_rtvHeap))))
+    {
+        swapChain3->Release(); return;
+    }
 
     // Heap para SRV — ImGui necesita uno para sus texturas internas
     D3D12_DESCRIPTOR_HEAP_DESC srvDesc{};
     srvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     srvDesc.NumDescriptors = 1;
     srvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-    s_device->CreateDescriptorHeap(&srvDesc, IID_PPV_ARGS(&s_srvHeap));
+    if (FAILED(s_device->CreateDescriptorHeap(&srvDesc, IID_PPV_ARGS(&s_srvHeap))))
+    {
+        swapChain3->Release(); return;
+    }
 
     // Command allocator y lista para ImGui
-    s_device->CreateCommandAllocator(
-        D3D12_COMMAND_LIST_TYPE_DIRECT,
-        IID_PPV_ARGS(&s_cmdAllocator));
-    s_device->CreateCommandList(
+    if (FAILED(s_device->CreateCommandAllocator(
+        D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&s_cmdAllocator))))
+    {
+        swapChain3->Release(); return;
+    }
+
+    if (FAILED(s_device->CreateCommandList(
         0, D3D12_COMMAND_LIST_TYPE_DIRECT,
-        s_cmdAllocator, nullptr,
-        IID_PPV_ARGS(&s_cmdList));
+        s_cmdAllocator, nullptr, IID_PPV_ARGS(&s_cmdList))))
+    {
+        swapChain3->Release(); return;
+    }
+
     s_cmdList->Close();
 
     // Inicializar ImGui
@@ -61,7 +79,7 @@ void Overlay::Init(IDXGISwapChain* swapChain, ID3D12CommandQueue* cmdQueue) {
 
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
-    io.IniFilename = nullptr; // no guardar layout de ImGui, nosotros manejamos config
+    io.IniFilename = nullptr;
 
     // Estilo: oscuro y minimalista
     ImGui::StyleColorsDark();
@@ -73,7 +91,7 @@ void Overlay::Init(IDXGISwapChain* swapChain, ID3D12CommandQueue* cmdQueue) {
     style.Alpha = 0.90f;
     style.WindowPadding = { 10.0f, 8.0f };
 
-    // Colores personalizados — acento ámbar oscuro
+    // Colores personalizados — acento ámbar
     auto* colors = ImGui::GetStyle().Colors;
     colors[ImGuiCol_SliderGrab] = ImVec4(0.85f, 0.55f, 0.10f, 1.0f);
     colors[ImGuiCol_SliderGrabActive] = ImVec4(1.00f, 0.70f, 0.15f, 1.0f);
@@ -102,11 +120,12 @@ void Overlay::Render() {
         s_visible = !s_visible;
 
     // Actualizar FPS counter siempre, aunque el overlay esté oculto
-    FILETIME ft; GetSystemTimePreciseAsFileTime(&ft);
+    FILETIME ft;
+    GetSystemTimePreciseAsFileTime(&ft);
     uint64_t now = ((uint64_t)ft.dwHighDateTime << 32 | ft.dwLowDateTime) * 100;
     s_fpsFrames++;
-    if (now - s_fpsLastTime >= 500'000'000ULL) { // actualizar cada 0.5s
-        s_fpsDisplay = s_fpsFrames * 2.0f;      // frames en 0.5s × 2 = FPS
+    if (now - s_fpsLastTime >= 500'000'000ULL) {
+        s_fpsDisplay = s_fpsFrames * 2.0f;
         s_fpsFrames = 0;
         s_fpsLastTime = now;
     }
@@ -117,7 +136,6 @@ void Overlay::Render() {
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
 
-    // Ventana minimalista — tamaño fijo, esquina superior izquierda
     ImGui::SetNextWindowSize({ 280.0f, 110.0f }, ImGuiCond_Always);
     ImGui::SetNextWindowPos({ 16.0f, 16.0f }, ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowBgAlpha(0.85f);
@@ -127,33 +145,40 @@ void Overlay::Render() {
         ImGuiWindowFlags_NoResize |
         ImGuiWindowFlags_NoScrollbar);
 
-    // FPS actual
     ImGui::Text("FPS: %.0f", s_fpsDisplay);
     ImGui::SameLine(180.0f);
     ImGui::TextDisabled("INSERT: ocultar");
-
     ImGui::Separator();
 
-    // Checkbox on/off
     auto& cfg = Config::Instance();
     if (ImGui::Checkbox("Limitar FPS", &cfg.limiterEnabled))
         cfg.Save("SimpleFPSLimiter.ini");
 
-    // Slider — solo activo si el limitador está encendido
     ImGui::BeginDisabled(!cfg.limiterEnabled);
     ImGui::SetNextItemWidth(200.0f);
-    if (ImGui::SliderFloat("##fps", &cfg.targetFPS, 20.0f, 360.0f, "%.0f FPS")) {
-        // Guardar solo cuando el usuario suelta el slider
+    if (ImGui::SliderFloat("##fps", &cfg.targetFPS, 20.0f, 360.0f, "%.0f FPS"))
         if (!ImGui::IsItemActive())
             cfg.Save("SimpleFPSLimiter.ini");
-    }
     ImGui::EndDisabled();
 
     ImGui::End();
     ImGui::Render();
 
-    // El render draw data lo ejecuta el hook después de llamar
-    // al Present original — ver dx12_hook.cpp
+    // Preparar el command list
+    s_cmdAllocator->Reset();
+    s_cmdList->Reset(s_cmdAllocator, nullptr);
+
+    // Decirle a DX12 qué descriptor heap usar (necesario para las texturas de ImGui)
+    ID3D12DescriptorHeap* heaps[] = { s_srvHeap };
+    s_cmdList->SetDescriptorHeaps(1, heaps);
+
+    // Enviar los vértices/índices de ImGui al command list
+    ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), s_cmdList);
+    s_cmdList->Close();
+
+    // Ejecutar el command list en la GPU — sin esto ImGui no se dibuja
+    ID3D12CommandList* lists[] = { s_cmdList };
+    s_cmdQueue->ExecuteCommandLists(1, lists);
 }
 
 void Overlay::OnResize() {
@@ -172,5 +197,7 @@ void Overlay::Shutdown() {
     if (s_cmdAllocator) s_cmdAllocator->Release();
     if (s_srvHeap)      s_srvHeap->Release();
     if (s_rtvHeap)      s_rtvHeap->Release();
+    s_cmdQueue = nullptr; // no hacemos Release — no es nuestro, es del juego
+    s_device = nullptr; // ídem
     s_initialized = false;
 }
